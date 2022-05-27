@@ -13,7 +13,6 @@ import (
 
 	logging "github.com/ipfs/go-log/v2"
 	ma "github.com/multiformats/go-multiaddr"
-	"github.com/raulk/go-watchdog"
 )
 
 var SilencePeriod = 10 * time.Second
@@ -51,7 +50,6 @@ type BasicConnMgr struct {
 	refCount           sync.WaitGroup
 	ctx                context.Context
 	cancel             func()
-	unregisterWatchdog func()
 }
 
 var (
@@ -103,7 +101,7 @@ func (s *segment) tagInfoFor(p peer.ID) *peerInfo {
 //   their connections terminated) until 'low watermark' peers remain.
 // * grace is the amount of time a newly opened connection is given before it becomes
 //   subject to pruning.
-func NewConnManager(low, hi int, grace time.Duration, opts ...Option) (*BasicConnMgr, error) {
+func NewConnManager(low, hi int, grace time.Duration, opts ...Option) *BasicConnMgr {
 	cfg := &config{
 		highWater:     hi,
 		lowWater:      low,
@@ -112,7 +110,7 @@ func NewConnManager(low, hi int, grace time.Duration, opts ...Option) (*BasicCon
 	}
 	for _, o := range opts {
 		if err := o(cfg); err != nil {
-			return nil, err
+			return nil
 		}
 	}
 
@@ -135,15 +133,12 @@ func NewConnManager(low, hi int, grace time.Duration, opts ...Option) (*BasicCon
 	}
 	cm.ctx, cm.cancel = context.WithCancel(context.Background())
 
-	// When we're running low on memory, immediately trigger a trim.
-	cm.unregisterWatchdog = watchdog.RegisterPostGCNotifee(cm.memoryEmergency)
-
 	decay, _ := NewDecayer(cfg.decayer, cm)
 	cm.decayer = decay
 
 	cm.refCount.Add(1)
 	go cm.background()
-	return cm, nil
+	return cm
 }
 
 // memoryEmergency is run when we run low on memory.
@@ -172,7 +167,6 @@ func (cm *BasicConnMgr) memoryEmergency() {
 
 func (cm *BasicConnMgr) Close() error {
 	cm.cancel()
-	cm.unregisterWatchdog()
 	if err := cm.decayer.Close(); err != nil {
 		return err
 	}
