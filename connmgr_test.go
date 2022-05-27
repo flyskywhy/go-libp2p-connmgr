@@ -3,7 +3,6 @@ package connmgr
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	tu "github.com/libp2p/go-libp2p-core/test"
 	ma "github.com/multiformats/go-multiaddr"
 
+	detectrace "github.com/ipfs/go-detect-race"
 	"github.com/stretchr/testify/require"
 )
 
@@ -20,20 +20,16 @@ type tconn struct {
 	network.Conn
 
 	peer             peer.ID
-	closed           uint32 // to be used atomically. Closed if 1
+	closed           bool
 	disconnectNotify func(net network.Network, conn network.Conn)
 }
 
 func (c *tconn) Close() error {
-	atomic.StoreUint32(&c.closed, 1)
+	c.closed = true
 	if c.disconnectNotify != nil {
 		c.disconnectNotify(nil, c)
 	}
 	return nil
-}
-
-func (c *tconn) isClosed() bool {
-	return atomic.LoadUint32(&c.closed) == 1
 }
 
 func (c *tconn) RemotePeer() peer.ID {
@@ -55,7 +51,7 @@ func randConn(t testing.TB, discNotify func(network.Network, network.Conn)) netw
 
 // Make sure multiple trim calls block.
 func TestTrimBlocks(t *testing.T) {
-	cm, err := NewConnManager(200, 300, WithGracePeriod(0))
+	cm, err := NewConnManager(200, 300, 0)
 	require.NoError(t, err)
 	defer cm.Close()
 
@@ -84,7 +80,7 @@ func TestTrimBlocks(t *testing.T) {
 
 // Make sure trim returns when closed.
 func TestTrimClosed(t *testing.T) {
-	cm, err := NewConnManager(200, 300, WithGracePeriod(0))
+	cm, err := NewConnManager(200, 300, 0)
 	require.NoError(t, err)
 	require.NoError(t, cm.Close())
 	cm.TrimOpenConns(context.Background())
@@ -92,7 +88,7 @@ func TestTrimClosed(t *testing.T) {
 
 // Make sure joining an existing trim works.
 func TestTrimJoin(t *testing.T) {
-	cm, err := NewConnManager(200, 300, WithGracePeriod(0))
+	cm, err := NewConnManager(200, 300, 0)
 	require.NoError(t, err)
 	defer cm.Close()
 
@@ -118,7 +114,7 @@ func TestTrimJoin(t *testing.T) {
 }
 
 func TestConnTrimming(t *testing.T) {
-	cm, err := NewConnManager(200, 300, WithGracePeriod(0))
+	cm, err := NewConnManager(200, 300, 0)
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -131,7 +127,7 @@ func TestConnTrimming(t *testing.T) {
 	}
 
 	for _, c := range conns {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Fatal("nothing should be closed yet")
 		}
 	}
@@ -146,12 +142,12 @@ func TestConnTrimming(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		c := conns[i]
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Fatal("these shouldnt be closed")
 		}
 	}
 
-	if !conns[299].(*tconn).isClosed() {
+	if !conns[299].(*tconn).closed {
 		t.Fatal("conn with bad tag should have gotten closed")
 	}
 }
@@ -166,7 +162,7 @@ func TestConnsToClose(t *testing.T) {
 	}
 
 	t.Run("below hi limit", func(t *testing.T) {
-		cm, err := NewConnManager(0, 10, WithGracePeriod(0))
+		cm, err := NewConnManager(0, 10, 0)
 		require.NoError(t, err)
 		defer cm.Close()
 		addConns(cm, 5)
@@ -174,7 +170,7 @@ func TestConnsToClose(t *testing.T) {
 	})
 
 	t.Run("below low limit", func(t *testing.T) {
-		cm, err := NewConnManager(10, 0, WithGracePeriod(0))
+		cm, err := NewConnManager(10, 0, 0)
 		require.NoError(t, err)
 		defer cm.Close()
 		addConns(cm, 5)
@@ -182,7 +178,7 @@ func TestConnsToClose(t *testing.T) {
 	})
 
 	t.Run("below low and hi limit", func(t *testing.T) {
-		cm, err := NewConnManager(1, 1, WithGracePeriod(0))
+		cm, err := NewConnManager(1, 1, 0)
 		require.NoError(t, err)
 		defer cm.Close()
 		addConns(cm, 1)
@@ -190,7 +186,7 @@ func TestConnsToClose(t *testing.T) {
 	})
 
 	t.Run("within silence period", func(t *testing.T) {
-		cm, err := NewConnManager(1, 1, WithGracePeriod(10*time.Minute))
+		cm, err := NewConnManager(1, 1, time.Duration(10*time.Minute))
 		require.NoError(t, err)
 		defer cm.Close()
 		addConns(cm, 1)
@@ -200,7 +196,7 @@ func TestConnsToClose(t *testing.T) {
 
 func TestGetTagInfo(t *testing.T) {
 	start := time.Now()
-	cm, err := NewConnManager(1, 1, WithGracePeriod(10*time.Minute))
+	cm, err := NewConnManager(1, 1, time.Duration(10*time.Minute))
 	require.NoError(t, err)
 	defer cm.Close()
 
@@ -273,7 +269,7 @@ func TestGetTagInfo(t *testing.T) {
 }
 
 func TestTagPeerNonExistant(t *testing.T) {
-	cm, err := NewConnManager(1, 1, WithGracePeriod(10*time.Minute))
+	cm, err := NewConnManager(1, 1, time.Duration(10*time.Minute))
 	require.NoError(t, err)
 	defer cm.Close()
 
@@ -286,7 +282,7 @@ func TestTagPeerNonExistant(t *testing.T) {
 }
 
 func TestUntagPeer(t *testing.T) {
-	cm, err := NewConnManager(1, 1, WithGracePeriod(10*time.Minute))
+	cm, err := NewConnManager(1, 1, time.Duration(10*time.Minute))
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -320,7 +316,7 @@ func TestUntagPeer(t *testing.T) {
 func TestGetInfo(t *testing.T) {
 	start := time.Now()
 	const gp = 10 * time.Minute
-	cm, err := NewConnManager(1, 5, WithGracePeriod(gp))
+	cm, err := NewConnManager(1, 5, gp)
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -349,7 +345,7 @@ func TestGetInfo(t *testing.T) {
 
 func TestDoubleConnection(t *testing.T) {
 	const gp = 10 * time.Minute
-	cm, err := NewConnManager(1, 5, WithGracePeriod(gp))
+	cm, err := NewConnManager(1, 5, gp)
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -367,7 +363,7 @@ func TestDoubleConnection(t *testing.T) {
 
 func TestDisconnected(t *testing.T) {
 	const gp = 10 * time.Minute
-	cm, err := NewConnManager(1, 5, WithGracePeriod(gp))
+	cm, err := NewConnManager(1, 5, gp)
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -401,10 +397,15 @@ func TestDisconnected(t *testing.T) {
 }
 
 func TestGracePeriod(t *testing.T) {
-	const gp = 100 * time.Millisecond
-	cm, err := NewConnManager(10, 20, WithGracePeriod(gp), WithSilencePeriod(time.Hour))
+	if detectrace.WithRace() {
+		t.Skip("race detector is unhappy with this test")
+	}
+
+	SilencePeriod = 0
+	cm, err := NewConnManager(10, 20, 100*time.Millisecond)
 	require.NoError(t, err)
 	defer cm.Close()
+	SilencePeriod = 10 * time.Second
 
 	not := cm.Notifee()
 
@@ -416,9 +417,9 @@ func TestGracePeriod(t *testing.T) {
 		conns = append(conns, rc)
 		not.Connected(nil, rc)
 
-		time.Sleep(2 * gp)
+		time.Sleep(200 * time.Millisecond)
 
-		if rc.(*tconn).isClosed() {
+		if rc.(*tconn).closed {
 			t.Fatal("expected conn to remain open")
 		}
 	}
@@ -433,7 +434,7 @@ func TestGracePeriod(t *testing.T) {
 	cm.TrimOpenConns(context.Background())
 
 	for _, c := range conns {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Fatal("expected no conns to be closed")
 		}
 	}
@@ -444,7 +445,7 @@ func TestGracePeriod(t *testing.T) {
 
 	closed := 0
 	for _, c := range conns {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			closed++
 		}
 	}
@@ -456,7 +457,11 @@ func TestGracePeriod(t *testing.T) {
 
 // see https://github.com/libp2p/go-libp2p-connmgr/issues/23
 func TestQuickBurstRespectsSilencePeriod(t *testing.T) {
-	cm, err := NewConnManager(10, 20, WithGracePeriod(0))
+	if detectrace.WithRace() {
+		t.Skip("race detector is unhappy with this test")
+	}
+
+	cm, err := NewConnManager(10, 20, 0)
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -476,7 +481,7 @@ func TestQuickBurstRespectsSilencePeriod(t *testing.T) {
 	// only the first trim is allowed in; make sure we close at most 20 connections, not all of them.
 	var closed int
 	for _, c := range conns {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			closed++
 		}
 	}
@@ -489,9 +494,16 @@ func TestQuickBurstRespectsSilencePeriod(t *testing.T) {
 }
 
 func TestPeerProtectionSingleTag(t *testing.T) {
-	cm, err := NewConnManager(19, 20, WithGracePeriod(0), WithSilencePeriod(time.Hour))
+	if detectrace.WithRace() {
+		t.Skip("race detector is unhappy with this test")
+	}
+
+	SilencePeriod = 0
+	cm, err := NewConnManager(19, 20, 0)
 	require.NoError(t, err)
 	defer cm.Close()
+	SilencePeriod = 10 * time.Second
+
 	not := cm.Notifee()
 
 	var conns []network.Conn
@@ -519,11 +531,10 @@ func TestPeerProtectionSingleTag(t *testing.T) {
 	// add 1 more conn, this shouldn't send us over the limit as protected conns don't count
 	addConn(20)
 
-	time.Sleep(100 * time.Millisecond)
 	cm.TrimOpenConns(context.Background())
 
 	for _, c := range conns {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Error("connection was closed by connection manager")
 		}
 	}
@@ -536,14 +547,14 @@ func TestPeerProtectionSingleTag(t *testing.T) {
 	cm.TrimOpenConns(context.Background())
 
 	for _, c := range protected {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Error("protected connection was closed by connection manager")
 		}
 	}
 
 	closed := 0
 	for _, c := range conns {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			closed++
 		}
 	}
@@ -561,20 +572,27 @@ func TestPeerProtectionSingleTag(t *testing.T) {
 
 	cm.TrimOpenConns(context.Background())
 
-	if !protected[0].(*tconn).isClosed() {
+	if !protected[0].(*tconn).closed {
 		t.Error("unprotected connection was kept open by connection manager")
 	}
 	for _, c := range protected[1:] {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Error("protected connection was closed by connection manager")
 		}
 	}
 }
 
 func TestPeerProtectionMultipleTags(t *testing.T) {
-	cm, err := NewConnManager(19, 20, WithGracePeriod(0), WithSilencePeriod(time.Hour))
+	if detectrace.WithRace() {
+		t.Skip("race detector is unhappy with this test")
+	}
+
+	SilencePeriod = 0
+	cm, err := NewConnManager(19, 20, 0)
 	require.NoError(t, err)
 	defer cm.Close()
+	SilencePeriod = 10 * time.Second
+
 	not := cm.Notifee()
 
 	// produce 20 connections with unique peers.
@@ -602,7 +620,7 @@ func TestPeerProtectionMultipleTags(t *testing.T) {
 	cm.TrimOpenConns(context.Background())
 
 	for _, c := range protected {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Error("protected connection was closed by connection manager")
 		}
 	}
@@ -625,7 +643,7 @@ func TestPeerProtectionMultipleTags(t *testing.T) {
 
 	// connections should still remain open, as they were protected.
 	for _, c := range protected[0:] {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Error("protected connection was closed by connection manager")
 		}
 	}
@@ -642,11 +660,11 @@ func TestPeerProtectionMultipleTags(t *testing.T) {
 
 	cm.TrimOpenConns(context.Background())
 
-	if !protected[0].(*tconn).isClosed() {
+	if !protected[0].(*tconn).closed {
 		t.Error("unprotected connection was kept open by connection manager")
 	}
 	for _, c := range protected[1:] {
-		if c.(*tconn).isClosed() {
+		if c.(*tconn).closed {
 			t.Error("protected connection was closed by connection manager")
 		}
 	}
@@ -654,9 +672,11 @@ func TestPeerProtectionMultipleTags(t *testing.T) {
 }
 
 func TestPeerProtectionIdempotent(t *testing.T) {
-	cm, err := NewConnManager(10, 20, WithGracePeriod(0), WithSilencePeriod(time.Hour))
+	SilencePeriod = 0
+	cm, err := NewConnManager(10, 20, 0)
 	require.NoError(t, err)
 	defer cm.Close()
+	SilencePeriod = 10 * time.Second
 
 	id, _ := tu.RandPeerID()
 	cm.Protect(id, "global")
@@ -686,7 +706,7 @@ func TestPeerProtectionIdempotent(t *testing.T) {
 }
 
 func TestUpsertTag(t *testing.T) {
-	cm, err := NewConnManager(1, 1, WithGracePeriod(10*time.Minute))
+	cm, err := NewConnManager(1, 1, time.Duration(10*time.Minute))
 	require.NoError(t, err)
 	defer cm.Close()
 	not := cm.Notifee()
@@ -723,7 +743,7 @@ func TestUpsertTag(t *testing.T) {
 }
 
 func TestTemporaryEntriesClearedFirst(t *testing.T) {
-	cm, err := NewConnManager(1, 1, WithGracePeriod(0))
+	cm, err := NewConnManager(1, 1, 0)
 	require.NoError(t, err)
 
 	id := tu.RandPeerIDFatal(t)
@@ -745,7 +765,7 @@ func TestTemporaryEntriesClearedFirst(t *testing.T) {
 }
 
 func TestTemporaryEntryConvertedOnConnection(t *testing.T) {
-	cm, err := NewConnManager(1, 1, WithGracePeriod(0))
+	cm, err := NewConnManager(1, 1, 0)
 	require.NoError(t, err)
 	defer cm.Close()
 
@@ -768,9 +788,15 @@ func TestTemporaryEntryConvertedOnConnection(t *testing.T) {
 
 // see https://github.com/libp2p/go-libp2p-connmgr/issues/82
 func TestConcurrentCleanupAndTagging(t *testing.T) {
-	cm, err := NewConnManager(1, 1, WithGracePeriod(0), WithSilencePeriod(time.Millisecond))
+	origMinCleanupInterval := minCleanupInterval
+	t.Cleanup(func() { minCleanupInterval = origMinCleanupInterval })
+	minCleanupInterval = time.Millisecond
+
+	SilencePeriod = 0
+	cm, err := NewConnManager(1, 1, 0)
 	require.NoError(t, err)
 	defer cm.Close()
+	SilencePeriod = 10 * time.Second
 
 	for i := 0; i < 1000; i++ {
 		conn := randConn(t, nil)
